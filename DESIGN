@@ -1,0 +1,124 @@
+===================
+Loud Noise Detector
+===================
+
+
+Overview
+========
+
+The application reads from “samples.bin” file, exactly one sample every 50ms, each
+sample is 16bit signed integer (simulated audio stream), the application tries to detect “loud noises” in the stream. When a noise is detected the application registers in a log file: triggering sample number (from the beginning of the file), the exact timestamp (millisecond resolution) of the noise, and a sequence of 11 samples ­ such that the triggering sample is the 6th sample (so in total we should get 5 samples before trigger, trigger, and 5 samples after trigger )
+once the application reaches the end of samples.bin file ­ it prints out “Done” and
+terminates.
+
+output file is a CSV file in the following format:
+#<trigger sample num>:<timestamp1>s,<sample1>,<sample2>,....,<sample11>
+#<trigger sample num>:<timestamp1>s,<sample1>,<sample2>,....,<sample11>
+#<trigger sample num>:<timestamp1>s,<sample1>,<sample2>,....,<sample11>
+#<trigger sample num>:<timestamp1>s,<sample1>,<sample2>,....,<sample11>
+
+
+Building the Application
+========================
+
+To build the application run:
+make
+
+To clean the application run:
+make clean
+
+To create a test samples.bin file run:
+python2 generate_data.py
+
+To view a time graph of the data generated run:
+python2 graph.py
+
+This application was writted and tested on Ubuntu 16.04 LTS with gcc 5.4.0
+
+
+Application Usage
+=================
+
+./lndetect.bin <source file>
+
+source file: This is an optional argument that specifies a 16 bit 20Hz sample rate
+				audio file that will br searched for "loud noises". If this argument is not  specified then the application will default to use a file called samples.bin in the same file as the execution directory. If this file does not exist, the application will error and exit. See section Utilities for instructions to create a samples.bin file.
+
+
+Application Architecture
+========================
+
+Main
+----
+
+The main function opens the source file, a linux pipe, and a logfile, and holds references to these in a struct. This struct is passed to two threads created in main; producer and consumer. Producer reads audio samples from the source file and sends them to the consumer thread over the pipe. When the producer thread finishes reading the file it sends a message to the consumer thread to exit. When both exit the main thread closes all file handles and prints "Done" to stdout. 
+
+
+common.h
+--------
+
+This file holds all parameratized defines for application run time.
+
+AUDIOFILENAME: default source file to read from is no file is specified on the 						command line (samples.bin)
+
+LOGFILENAME: file name to log noise data to (log.csv)
+
+SAMPLE_PERIOD_MS: sample period (50ms)
+
+SAMPLE: typedef specifying the type of an audio sample (int16_t)
+
+THRESHOLD_PERC: 0.0-1.0 value specifying the threshold value to detect a "loud noise"
+
+PROCESS_ACCUMULATE: number of samples to write to log file where loud noise exists
+
+
+Producer Thread
+---------------
+
+The producer creates a timerfd with a SAMPLE_PERIOD_MS periodic interval. At the top of the loop, it selects on the timerfd. When the timer overflows, the thread wakes up and reads a SAMPLE from the AUDIOFILENAME. When PROCESS_ACCUMULATE SAMPLES are read from the file the thread sends the entire buffer over the pipe to the consumer thread and continues to execute. When EOF is reached, it zeros out the end of its buffer and sends PROCESS_ACCUMULATE SAMPLEs to the consumer thread, exits its loop and sends an int to the consumer thread telling it to exit after it finishes with the last buffer. It then closes the timerfd and exists. 
+
+
+Consumer Thread
+---------------
+
+The consumer thread uses a peak detect function to look for "loud noises". 
+
+process_samples
+~~~~~~~~~~~~~~~
+ ___________________ ___________________________
+|____old buffer_____|_________new buffer________| --time--->
+
+This function selects on the pipe waiting for buffers from the producer threads. When new data comes in it reads the samples from the pipe and passes the new buffer and the last buffer to the peak detect function. After peak detect, the new buffer gets swapped to the old buffer and the loop waits to read new data in the new buffer. If a buffer comes across the pipe that is smaller than PROCESS_ACCUMULATE SAMPLEs the thread exits.
+
+peak_detect
+~~~~~~~~~~~
+This function takes an old buffer and a new buffer. An average is taken on the first (PROCESS_ACCUMULATE >> 2) SAMPLES in the old buffer. Each sample after that in the old buffer and the new buffer is compared against that average. If the distance of the sample from the average is above the threshold, the sample is a "loud noise" and is logged. New samples above the threshold are not logged until the samples fall back below the threshold. The last 5 samples in the new buffer are not checked for "loud noises" because that will be checked when they get swapped to the old buffer. If a sample is below the threshold, it contributes to the moving average calculation.
+
+
+Python Helper Applications
+==========================
+
+Dependencies: python2 numpy matplotlib
+
+generate_data.py
+----------------
+
+Generates 300 samples of white noise random data and adds a positive square pulse of length 10 and amplitude INT16_MAX at sample 100 and a negative square pulse of length 10 and amplitude INT16_MIN at sample 200. This data is then written to a file called samples.bin.
+
+graph.py
+--------
+
+Uses matplotlib to graph the data in samples.bin for visualization.
+
+
+Issues and Future Enhancements
+==============================
+
+The peak detect algorithm is not robust against loud background noise environments. The threshold value is currently set as a static distance from the mean, and if the mean is high, the algorithm will never trigger. The threshold should ceiling at some threshold value or the data should be sent through a noise cancelation filter.
+
+Because the sampling period is so long, no optimizations were done on the algorithm or thread synchronization structures. There are many data copies and slow sleep wake up cycles that were employed here for simplicity. In a true application where audio sampling rates are more realistic and resources are constrained, more consideration should be taken when designing the thread synchronization mechanism and the peak detection algorithm. 
+
+
+
+
+
